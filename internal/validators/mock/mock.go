@@ -3,7 +3,7 @@ package mock
 import (
 	"context"
 
-	"github.com/upsidr/merge-gatekeeper/internal/validators"
+	"github.com/aac228/merge-gatekeeper/internal/validators"
 )
 
 type Status struct {

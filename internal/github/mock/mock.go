@@ -3,20 +3,20 @@ package mock
 import (
 	"context"
 
-	"github.com/upsidr/merge-gatekeeper/internal/github"
+	"github.com/aac228/merge-gatekeeper/internal/github"
 )
 
 type Client struct {
-	GetCombinedStatusFunc   func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error)
 	ListCheckRunsForRefFunc func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error)
-}
-
-func (c *Client) GetCombinedStatus(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-	return c.GetCombinedStatusFunc(ctx, owner, repo, ref, opts)
+	ListWorkflowRunsFunc    func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error)
 }
 
 func (c *Client) ListCheckRunsForRef(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 	return c.ListCheckRunsForRefFunc(ctx, owner, repo, ref, opts)
+}
+
+func (c *Client) ListWorkflowRuns(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+	return c.ListWorkflowRunsFunc(ctx, owner, repo, opts)
 }
 
 var (

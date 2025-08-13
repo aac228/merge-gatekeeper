@@ -9,10 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/upsidr/merge-gatekeeper/internal/github"
-	"github.com/upsidr/merge-gatekeeper/internal/ticker"
-	"github.com/upsidr/merge-gatekeeper/internal/validators"
-	"github.com/upsidr/merge-gatekeeper/internal/validators/status"
+	"github.com/aac228/merge-gatekeeper/internal/github"
+	"github.com/aac228/merge-gatekeeper/internal/ticker"
+	"github.com/aac228/merge-gatekeeper/internal/validators"
+	"github.com/aac228/merge-gatekeeper/internal/validators/status"
 )
 
 const defaultSelfJobName = "merge-gatekeeper"

@@ -7,13 +7,18 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/upsidr/merge-gatekeeper/internal/github"
-	"github.com/upsidr/merge-gatekeeper/internal/github/mock"
-	"github.com/upsidr/merge-gatekeeper/internal/validators"
+	"github.com/aac228/merge-gatekeeper/internal/github"
+	"github.com/aac228/merge-gatekeeper/internal/github/mock"
+	"github.com/aac228/merge-gatekeeper/internal/validators"
 )
 
 func stringPtr(str string) *string {
 	return &str
+}
+
+func intPtr(v int) *int64 {
+	i := int64(v)
+	return &i
 }
 
 func min(a, b int) int {
@@ -160,23 +165,13 @@ func Test_statusValidator_Validate(t *testing.T) {
 		wantStatus  validators.Status
 	}
 	tests := map[string]test{
-		"returns error when listGhaStatuses return an error": {
-			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return nil, nil, errors.New("err")
-				},
-			},
-			wantErr:    true,
-			wantStatus: nil,
-			wantErrStr: "err",
-		},
 		"returns succeeded status and nil when there is no job": {
 			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{}, nil, nil
-				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 					return &github.ListCheckRunsResults{}, nil, nil
+				},
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					return &github.WorkflowRuns{}, nil, nil
 				},
 			},
 			wantErr: false,
@@ -191,18 +186,32 @@ func Test_statusValidator_Validate(t *testing.T) {
 		"returns succeeded status and nil when there is one job, which is itself": {
 			selfJobName: "self-job",
 			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					total := 1
+					return &github.ListCheckRunsResults{
+						Total: &total,
+						CheckRuns: []*github.CheckRun{
 							{
-								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState), // should be irrelevant
+								Name:   stringPtr("self-job"),
+								Status: stringPtr(checkRunInProgressStatus),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 						},
 					}, nil, nil
 				},
-				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
-					return &github.ListCheckRunsResults{}, nil, nil
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 1
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Merge Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+						},
+					}, nil, nil
 				},
 			},
 			wantErr: false,
@@ -216,24 +225,36 @@ func Test_statusValidator_Validate(t *testing.T) {
 		},
 		"returns failed status and nil when there is one job": {
 			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
 							{
-								Context: stringPtr("job"),
-								State:   stringPtr(pendingState),
+								Name:   stringPtr("job"),
+								Status: stringPtr(checkRunInProgressStatus),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 						},
 					}, nil, nil
 				},
-				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
-					return &github.ListCheckRunsResults{}, nil, nil
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 1
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+						},
+					}, nil, nil
 				},
 			},
 			wantErr: false,
 			wantStatus: &status{
 				succeeded:    false,
-				totalJobs:    []string{"job"},
+				totalJobs:    []string{"Workflow / job"},
 				completeJobs: []string{},
 				ignoredJobs:  []string{},
 				errJobs:      []string{},
@@ -242,38 +263,62 @@ func Test_statusValidator_Validate(t *testing.T) {
 		"returns error when there is a failed job": {
 			selfJobName: "self-job",
 			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
 							{
-								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								Name:       stringPtr("job-01"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("job-02"),
-								State:   stringPtr(errorState),
+								Name:       stringPtr("job-02"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunTimedOutConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								Name:   stringPtr("self-job"),
+								Status: stringPtr(checkRunQueuedStatus),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(2),
+								},
 							},
 						},
 					}, nil, nil
 				},
-				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
-					return &github.ListCheckRunsResults{}, nil, nil
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+							{
+								Name:         stringPtr("Merge Workflow"),
+								CheckSuiteID: intPtr(2),
+							},
+						},
+					}, nil, nil
 				},
 			},
 			wantErr: true,
 			wantErrStr: (&status{
 				totalJobs: []string{
-					"job-01", "job-02",
+					"Workflow / job-01", "Workflow / job-02",
 				},
 				completeJobs: []string{
-					"job-01",
+					"Workflow / job-01",
 				},
 				errJobs: []string{
-					"job-02",
+					"Workflow / job-02",
 				},
 				ignoredJobs: []string{},
 			}).Detail(),
@@ -281,38 +326,62 @@ func Test_statusValidator_Validate(t *testing.T) {
 		"returns error when there is a failed job with failure state": {
 			selfJobName: "self-job",
 			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
 							{
-								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								Name:       stringPtr("job-01"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("job-02"),
-								State:   stringPtr(failureState),
+								Name:       stringPtr("job-02"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunFailedConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								Name:   stringPtr("self-job"),
+								Status: stringPtr(pendingState),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(2),
+								},
 							},
 						},
 					}, nil, nil
 				},
-				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
-					return &github.ListCheckRunsResults{}, nil, nil
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+							{
+								Name:         stringPtr("Merge Workflow"),
+								CheckSuiteID: intPtr(2),
+							},
+						},
+					}, nil, nil
 				},
 			},
 			wantErr: true,
 			wantErrStr: (&status{
 				totalJobs: []string{
-					"job-01", "job-02",
+					"Workflow / job-01", "Workflow / job-02",
 				},
 				completeJobs: []string{
-					"job-01",
+					"Workflow / job-01",
 				},
 				errJobs: []string{
-					"job-02",
+					"Workflow / job-02",
 				},
 				ignoredJobs: []string{},
 			}).Detail(),
@@ -320,37 +389,60 @@ func Test_statusValidator_Validate(t *testing.T) {
 		"returns failed status and nil when successful job count is less than total": {
 			selfJobName: "self-job",
 			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
 							{
-								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								Name:       stringPtr("job-01"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("job-02"),
-								State:   stringPtr(pendingState),
+								Name:   stringPtr("job-02"),
+								Status: stringPtr(checkRunInProgressStatus),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								Name:   stringPtr("self-job"),
+								Status: stringPtr(checkRunInProgressStatus),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(2),
+								},
 							},
 						},
 					}, nil, nil
 				},
-				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
-					return &github.ListCheckRunsResults{}, nil, nil
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+							{
+								Name:         stringPtr("Merge Workflow"),
+								CheckSuiteID: intPtr(2),
+							},
+						},
+					}, nil, nil
 				},
 			},
 			wantErr: false,
 			wantStatus: &status{
 				succeeded: false,
 				totalJobs: []string{
-					"job-01",
-					"job-02",
+					"Workflow / job-01",
+					"Workflow / job-02",
 				},
 				completeJobs: []string{
-					"job-01",
+					"Workflow / job-01",
 				},
 				errJobs:     []string{},
 				ignoredJobs: []string{},
@@ -359,38 +451,66 @@ func Test_statusValidator_Validate(t *testing.T) {
 		"returns succeeded status and nil when validation is success": {
 			selfJobName: "self-job",
 			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
 							{
-								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								Name:       stringPtr("job-01"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("job-02"),
-								State:   stringPtr(successState),
+								Name:       stringPtr("job-02"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(2),
+								},
 							},
 							{
-								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								Name:   stringPtr("self-job"),
+								Status: stringPtr(checkRunInProgressStatus),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(3),
+								},
 							},
 						},
 					}, nil, nil
 				},
-				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
-					return &github.ListCheckRunsResults{}, nil, nil
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow 1"),
+								CheckSuiteID: intPtr(1),
+							},
+							{
+								Name:         stringPtr("Workflow 2"),
+								CheckSuiteID: intPtr(2),
+							},
+							{
+								Name:         stringPtr("Merge Workflow"),
+								CheckSuiteID: intPtr(3),
+							},
+						},
+					}, nil, nil
 				},
 			},
 			wantErr: false,
 			wantStatus: &status{
 				succeeded: true,
 				totalJobs: []string{
-					"job-01",
-					"job-02",
+					"Workflow 1 / job-01",
+					"Workflow 2 / job-02",
 				},
 				completeJobs: []string{
-					"job-01",
-					"job-02",
+					"Workflow 1 / job-01",
+					"Workflow 2 / job-02",
 				},
 				errJobs:     []string{},
 				ignoredJobs: []string{},
@@ -400,68 +520,57 @@ func Test_statusValidator_Validate(t *testing.T) {
 			selfJobName: "self-job",
 			ignoredJobs: []string{"job-02", "job-03"}, // String input here should be already TrimSpace'd
 			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
 							{
-								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								Name:       stringPtr("job-01"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("job-02"),
-								State:   stringPtr(errorState),
+								Name:       stringPtr("job-02"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunFailedConclusion),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(1),
+								},
 							},
 							{
-								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								Name:   stringPtr("self-job"),
+								Status: stringPtr(checkRunInProgressStatus),
+								CheckSuite: &github.CheckSuite{
+									ID: intPtr(2),
+								},
 							},
 						},
 					}, nil, nil
 				},
-				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
-					return &github.ListCheckRunsResults{}, nil, nil
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+							{
+								Name:         stringPtr("Merge Workflow"),
+								CheckSuiteID: intPtr(2),
+							},
+						},
+					}, nil, nil
 				},
 			},
 			wantErr: false,
 			wantStatus: &status{
 				succeeded:    true,
-				totalJobs:    []string{"job-01"},
-				completeJobs: []string{"job-01"},
-				errJobs:      []string{},
-				ignoredJobs:  []string{"job-02", "job-03"},
-			},
-		},
-		"returns succeeded status and nil when only an ignored job is failing, with failure state": {
-			selfJobName: "self-job",
-			ignoredJobs: []string{"job-02", "job-03"},
-			client: &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
-							{
-								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
-							},
-							{
-								Context: stringPtr("job-02"),
-								State:   stringPtr(failureState),
-							},
-							{
-								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
-							},
-						},
-					}, nil, nil
-				},
-				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
-					return &github.ListCheckRunsResults{}, nil, nil
-				},
-			},
-			wantErr: false,
-			wantStatus: &status{
-				succeeded:    true,
-				totalJobs:    []string{"job-01"},
-				completeJobs: []string{"job-01"},
+				totalJobs:    []string{"Workflow / job-01"},
+				completeJobs: []string{"Workflow / job-01"},
 				errJobs:      []string{},
 				ignoredJobs:  []string{"job-02", "job-03"},
 			},
@@ -506,55 +615,52 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 		want    []*ghaStatus
 	}
 	tests := map[string]test{
-		"succeeds to get job statuses even if the same job exists": func() test {
+		"succeeds to get job statuses": func() test {
 			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
-							// The first element here is the latest state.
-							{
-								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
-							},
-							{
-								Context: stringPtr("job-01"), // Same as above job name, and thus should be disregarded as old job status.
-								State:   stringPtr(errorState),
-							},
-						},
-					}, nil, nil
-				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 					return &github.ListCheckRunsResults{
 						CheckRuns: []*github.CheckRun{
 							// The first element here is the latest state.
 							{
-								Name:   stringPtr("job-02"),
-								Status: stringPtr("failure"),
-							},
-							{
-								Name:       stringPtr("job-02"), // Same as above job name, and thus should be disregarded as old job status.
-								Status:     stringPtr(checkRunCompletedStatus),
-								Conclusion: stringPtr(checkRunNeutralConclusion),
+								Name:       stringPtr("job-02"),
+								Status:     stringPtr(checkRunInProgressStatus),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 							},
 							{
 								Name:       stringPtr("job-03"),
 								Status:     stringPtr(checkRunCompletedStatus),
 								Conclusion: stringPtr(checkRunNeutralConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 							},
 							{
 								Name:       stringPtr("job-04"),
 								Status:     stringPtr(checkRunCompletedStatus),
 								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 							},
 							{
 								Name:       stringPtr("job-05"),
 								Status:     stringPtr(checkRunCompletedStatus),
-								Conclusion: stringPtr("failure"),
+								Conclusion: stringPtr(checkRunFailedConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 							},
 							{
 								Name:       stringPtr("job-06"),
 								Status:     stringPtr(checkRunCompletedStatus),
 								Conclusion: stringPtr(checkRunSkipConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
+							},
+						},
+					}, nil, nil
+				},
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 1
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
 							},
 						},
 					}, nil, nil
@@ -571,73 +677,35 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				wantErr: false,
 				want: []*ghaStatus{
 					{
-						Job:   "job-01",
-						State: successState,
+						Job:      "job-02",
+						State:    pendingState,
+						Workflow: "Workflow",
 					},
 					{
-						Job:   "job-02",
-						State: pendingState,
+						Job:      "job-03",
+						State:    successState,
+						Workflow: "Workflow",
 					},
 					{
-						Job:   "job-03",
-						State: successState,
+						Job:      "job-04",
+						State:    successState,
+						Workflow: "Workflow",
 					},
 					{
-						Job:   "job-04",
-						State: successState,
-					},
-					{
-						Job:   "job-05",
-						State: errorState,
+						Job:      "job-05",
+						State:    errorState,
+						Workflow: "Workflow",
 					},
 				},
-			}
-		}(),
-		"returns error when the GetCombinedStatus returns an error": func() test {
-			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return nil, nil, errors.New("err")
-				},
-			}
-			return test{
-				fields: fields{
-					client:      c,
-					selfJobName: "self-job",
-					owner:       "test-owner",
-					repo:        "test-repo",
-					ref:         "main",
-				},
-				wantErr: true,
-			}
-		}(),
-		"returns error when the GetCombinedStatus response is invalid": func() test {
-			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
-							{},
-						},
-					}, nil, nil
-				},
-			}
-			return test{
-				fields: fields{
-					client:      c,
-					selfJobName: "self-job",
-					owner:       "test-owner",
-					repo:        "test-repo",
-					ref:         "main",
-				},
-				wantErr: true,
 			}
 		}(),
 		"returns error when the ListCheckRunsForRef returns an error": func() test {
 			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{}, nil, nil
-				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 					return nil, nil, errors.New("error")
+				},
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					return &github.WorkflowRuns{}, nil, nil
 				},
 			}
 			return test{
@@ -653,15 +721,15 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 		}(),
 		"returns error when the ListCheckRunsForRef response is invalid": func() test {
 			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{}, nil, nil
-				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 					return &github.ListCheckRunsResults{
 						CheckRuns: []*github.CheckRun{
 							{},
 						},
 					}, nil, nil
+				},
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					return &github.WorkflowRuns{}, nil, nil
 				},
 			}
 			return test{
@@ -677,42 +745,49 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 		}(),
 		"returns nil when no error occurs": func() test {
 			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					return &github.CombinedStatus{
-						Statuses: []*github.RepoStatus{
-							{
-								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
-							},
-						},
-					}, nil, nil
-				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 					return &github.ListCheckRunsResults{
 						CheckRuns: []*github.CheckRun{
 							{
-								Name:   stringPtr("job-02"),
-								Status: stringPtr("failure"),
+								Name:       stringPtr("job-02"),
+								Status:     stringPtr(checkRunFailedConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 							},
 							{
 								Name:       stringPtr("job-03"),
 								Status:     stringPtr(checkRunCompletedStatus),
 								Conclusion: stringPtr(checkRunNeutralConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 							},
 							{
 								Name:       stringPtr("job-04"),
 								Status:     stringPtr(checkRunCompletedStatus),
 								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 							},
 							{
 								Name:       stringPtr("job-05"),
 								Status:     stringPtr(checkRunCompletedStatus),
-								Conclusion: stringPtr("failure"),
+								Conclusion: stringPtr(checkRunFailedConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 							},
 							{
 								Name:       stringPtr("job-06"),
 								Status:     stringPtr(checkRunCompletedStatus),
 								Conclusion: stringPtr(checkRunSkipConclusion),
+								CheckSuite: &github.CheckSuite{ID: intPtr(1)},
+							},
+						},
+					}, nil, nil
+				},
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 1
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
 							},
 						},
 					}, nil, nil
@@ -729,24 +804,24 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				wantErr: false,
 				want: []*ghaStatus{
 					{
-						Job:   "job-01",
-						State: successState,
+						Job:      "job-02",
+						State:    pendingState,
+						Workflow: "Workflow",
 					},
 					{
-						Job:   "job-02",
-						State: pendingState,
+						Job:      "job-03",
+						State:    successState,
+						Workflow: "Workflow",
 					},
 					{
-						Job:   "job-03",
-						State: successState,
+						Job:      "job-04",
+						State:    successState,
+						Workflow: "Workflow",
 					},
 					{
-						Job:   "job-04",
-						State: successState,
-					},
-					{
-						Job:   "job-05",
-						State: errorState,
+						Job:      "job-05",
+						State:    errorState,
+						Workflow: "Workflow",
 					},
 				},
 			}
@@ -766,29 +841,34 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 					Name:       stringPtr(fmt.Sprintf("job-%d", i)),
 					Status:     stringPtr(checkRunCompletedStatus),
 					Conclusion: stringPtr(checkRunNeutralConclusion),
+					CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 				}
 
 				expectedGhaStatuses[i] = &ghaStatus{
-					Job:   fmt.Sprintf("job-%d", i),
-					State: successState,
+					Job:      fmt.Sprintf("job-%d", i),
+					State:    successState,
+					Workflow: "Workflow",
 				}
 			}
 
 			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					max := min(opts.Page*opts.PerPage, len(statuses))
-					sts := statuses[(opts.Page-1)*opts.PerPage : max]
-					l := len(sts)
-					return &github.CombinedStatus{
-						Statuses:   sts,
-						TotalCount: &l,
-					}, nil, nil
-				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 					l := len(checkRuns)
 					return &github.ListCheckRunsResults{
 						CheckRuns: checkRuns,
 						Total:     &l,
+					}, nil, nil
+				},
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 1
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+						},
 					}, nil, nil
 				},
 			}
@@ -806,42 +886,41 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 		}(),
 		"succeeds to retrieve 162 statuses": func() test {
 			num_statuses := 162
-			statuses := make([]*github.RepoStatus, num_statuses)
 			checkRuns := make([]*github.CheckRun, num_statuses)
 			expectedGhaStatuses := make([]*ghaStatus, num_statuses)
 			for i := 0; i < num_statuses; i++ {
-				statuses[i] = &github.RepoStatus{
-					Context: stringPtr(fmt.Sprintf("job-%d", i)),
-					State:   stringPtr(successState),
-				}
-
 				checkRuns[i] = &github.CheckRun{
 					Name:       stringPtr(fmt.Sprintf("job-%d", i)),
 					Status:     stringPtr(checkRunCompletedStatus),
 					Conclusion: stringPtr(checkRunNeutralConclusion),
+					CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 				}
 
 				expectedGhaStatuses[i] = &ghaStatus{
-					Job:   fmt.Sprintf("job-%d", i),
-					State: successState,
+					Job:      fmt.Sprintf("job-%d", i),
+					State:    successState,
+					Workflow: "Workflow",
 				}
 			}
 
 			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					max := min(opts.Page*opts.PerPage, len(statuses))
-					sts := statuses[(opts.Page-1)*opts.PerPage : max]
-					l := len(sts)
-					return &github.CombinedStatus{
-						Statuses:   sts,
-						TotalCount: &l,
-					}, nil, nil
-				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 					l := len(checkRuns)
 					return &github.ListCheckRunsResults{
 						CheckRuns: checkRuns,
 						Total:     &l,
+					}, nil, nil
+				},
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 1
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+						},
 					}, nil, nil
 				},
 			}
@@ -857,44 +936,43 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				want:    expectedGhaStatuses,
 			}
 		}(),
-		"succeeds to retrieve 587 statuses": func() test {
+		"succeeds to retrieve 587 check runs": func() test {
 			num_statuses := 587
-			statuses := make([]*github.RepoStatus, num_statuses)
 			checkRuns := make([]*github.CheckRun, num_statuses)
 			expectedGhaStatuses := make([]*ghaStatus, num_statuses)
 			for i := 0; i < num_statuses; i++ {
-				statuses[i] = &github.RepoStatus{
-					Context: stringPtr(fmt.Sprintf("job-%d", i)),
-					State:   stringPtr(successState),
-				}
-
 				checkRuns[i] = &github.CheckRun{
 					Name:       stringPtr(fmt.Sprintf("job-%d", i)),
 					Status:     stringPtr(checkRunCompletedStatus),
 					Conclusion: stringPtr(checkRunNeutralConclusion),
+					CheckSuite: &github.CheckSuite{ID: intPtr(1)},
 				}
 
 				expectedGhaStatuses[i] = &ghaStatus{
-					Job:   fmt.Sprintf("job-%d", i),
-					State: successState,
+					Job:      fmt.Sprintf("job-%d", i),
+					State:    successState,
+					Workflow: "Workflow",
 				}
 			}
 
 			c := &mock.Client{
-				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
-					max := min(opts.Page*opts.PerPage, len(statuses))
-					sts := statuses[(opts.Page-1)*opts.PerPage : max]
-					l := len(sts)
-					return &github.CombinedStatus{
-						Statuses:   sts,
-						TotalCount: &l,
-					}, nil, nil
-				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
 					l := len(checkRuns)
 					return &github.ListCheckRunsResults{
 						CheckRuns: checkRuns,
 						Total:     &l,
+					}, nil, nil
+				},
+				ListWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					total := 1
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{
+								Name:         stringPtr("Workflow"),
+								CheckSuiteID: intPtr(1),
+							},
+						},
 					}, nil, nil
 				},
 			}

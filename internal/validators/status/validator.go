@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/upsidr/merge-gatekeeper/internal/github"
-	"github.com/upsidr/merge-gatekeeper/internal/multierror"
-	"github.com/upsidr/merge-gatekeeper/internal/validators"
+	"github.com/aac228/merge-gatekeeper/internal/github"
+	"github.com/aac228/merge-gatekeeper/internal/multierror"
+	"github.com/aac228/merge-gatekeeper/internal/validators"
 )
 
 const (
@@ -19,12 +19,16 @@ const (
 
 // NOTE: https://docs.github.com/en/rest/reference/checks
 const (
-	checkRunCompletedStatus = "completed"
+	checkRunCompletedStatus  = "completed"
+	checkRunQueuedStatus     = "queued"
+	checkRunInProgressStatus = "in_progress"
 )
 const (
-	checkRunNeutralConclusion = "neutral"
-	checkRunSuccessConclusion = "success"
-	checkRunSkipConclusion    = "skipped"
+	checkRunNeutralConclusion  = "neutral"
+	checkRunSuccessConclusion  = "success"
+	checkRunSkipConclusion     = "skipped"
+	checkRunFailedConclusion   = "failure"
+	checkRunTimedOutConclusion = "timed_out"
 )
 
 const (
@@ -38,8 +42,13 @@ var (
 )
 
 type ghaStatus struct {
-	Job   string
-	State string
+	Job      string
+	Workflow string
+	State    string
+}
+
+func (gs *ghaStatus) String() string {
+	return fmt.Sprintf("%s / %s", gs.Workflow, gs.Job)
 }
 
 type statusValidator struct {
@@ -126,14 +135,14 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 			continue
 		}
 
-		st.totalJobs = append(st.totalJobs, ghaStatus.Job)
+		st.totalJobs = append(st.totalJobs, ghaStatus.String())
 
 		switch ghaStatus.State {
 		case successState:
-			st.completeJobs = append(st.completeJobs, ghaStatus.Job)
+			st.completeJobs = append(st.completeJobs, ghaStatus.String())
 			successCnt++
 		case errorState, failureState:
-			st.errJobs = append(st.errJobs, ghaStatus.Job)
+			st.errJobs = append(st.errJobs, ghaStatus.String())
 		}
 	}
 	if len(st.errJobs) != 0 {
@@ -146,23 +155,6 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 	}
 
 	return st, nil
-}
-
-func (sv *statusValidator) getCombinedStatus(ctx context.Context) ([]*github.RepoStatus, error) {
-	var combined []*github.RepoStatus
-	page := 1
-	for {
-		c, _, err := sv.client.GetCombinedStatus(ctx, sv.owner, sv.repo, sv.ref, &github.ListOptions{PerPage: maxStatusesPerPage, Page: page})
-		if err != nil {
-			return nil, err
-		}
-		combined = append(combined, c.Statuses...)
-		if c.GetTotalCount() < maxStatusesPerPage {
-			break
-		}
-		page++
-	}
-	return combined, nil
 }
 
 func (sv *statusValidator) listCheckRunsForRef(ctx context.Context) ([]*github.CheckRun, error) {
@@ -186,48 +178,48 @@ func (sv *statusValidator) listCheckRunsForRef(ctx context.Context) ([]*github.C
 }
 
 func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, error) {
-	combined, err := sv.getCombinedStatus(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Because multiple jobs with the same name may exist when jobs are created dynamically by third-party tools, etc.,
-	// only the latest job should be managed.
 	currentJobs := make(map[string]struct{})
 
-	ghaStatuses := make([]*ghaStatus, 0, len(combined))
-	for _, s := range combined {
-		if s.Context == nil || s.State == nil {
-			return nil, fmt.Errorf("%w context: %v, status: %v", ErrInvalidCombinedStatusResponse, s.Context, s.State)
-		}
-		if _, ok := currentJobs[*s.Context]; ok {
-			continue
-		}
-		currentJobs[*s.Context] = struct{}{}
-
-		ghaStatuses = append(ghaStatuses, &ghaStatus{
-			Job:   *s.Context,
-			State: *s.State,
-		})
-	}
-
+	// Get all the checks related to this reference
 	runResults, err := sv.listCheckRunsForRef(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	ghaStatuses := make([]*ghaStatus, 0, len(runResults))
+
+	// Get all the workflows related to this reference, this allows us to map the check suite ID to the workflow name
+	workflowRuns, _, err := sv.client.ListWorkflowRuns(ctx, sv.owner, sv.repo, &github.ListWorkflowRunsOptions{
+		HeadSHA: sv.ref,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Map check suite ID to workflow name
+	suiteToWorkflow := make(map[int64]string)
+	fmt.Println("Found workflows:")
+	for _, wf := range workflowRuns.WorkflowRuns {
+		fmt.Println("-", wf.GetName())
+		suiteToWorkflow[wf.GetCheckSuiteID()] = wf.GetName()
+	}
+
 	for _, run := range runResults {
+		checkKey, wfName, err := CreateCheckKey(run, suiteToWorkflow)
+		if err != nil {
+			return nil, err
+		}
+
 		if run.Name == nil || run.Status == nil {
 			return nil, fmt.Errorf("%w name: %v, status: %v", ErrInvalidCheckRunResponse, run.Name, run.Status)
 		}
-		if _, ok := currentJobs[*run.Name]; ok {
+		if _, ok := currentJobs[checkKey]; ok {
 			continue
 		}
-		currentJobs[*run.Name] = struct{}{}
+		currentJobs[checkKey] = struct{}{}
 
-		ghaStatus := &ghaStatus{
-			Job: *run.Name,
-		}
+		ghaStatus := &ghaStatus{Job: *run.Name, Workflow: wfName}
 
 		if *run.Status != checkRunCompletedStatus {
 			ghaStatus.State = pendingState
@@ -247,4 +239,20 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	}
 
 	return ghaStatuses, nil
+}
+
+func CreateCheckKey(run *github.CheckRun, suiteToWorkflow map[int64]string) (string, string, error) {
+	checkSuiteID := run.GetCheckSuite().GetID()
+	wfName, ok := suiteToWorkflow[checkSuiteID]
+
+	fmt.Println("Found associated workflows:")
+	for _, v := range suiteToWorkflow {
+		fmt.Println("-", v)
+	}
+
+	if !ok {
+		return "", "", fmt.Errorf("workflow name not found for check suite ID: %v of run %v", checkSuiteID, *run.Name)
+	}
+
+	return fmt.Sprintf("%v / %v", wfName, *run.Name), wfName, nil
 }
